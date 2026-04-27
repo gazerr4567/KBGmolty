@@ -29,7 +29,7 @@ def determine_state(me_response: dict) -> tuple[str, dict]:
         if game.get("gameStatus") in ("waiting", "running"):
             log.info("Active game found: %s (status=%s)",
                      game["gameId"], game["gameStatus"])
-                        if game["gameStatus"] == "running":
+            if game["gameStatus"] == "running":
                 agent = AggressiveAgent(game)
                 agent.run_logic(game)
             return IN_GAME, {
