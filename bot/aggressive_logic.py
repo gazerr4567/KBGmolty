@@ -1,141 +1,97 @@
 import math
-import requests
-import time
 
-class AggressiveAgent: # Nama kelas disamakan agar main.py tidak error
-    def __init__(self, bot_instance=None):
-        # KONFIGURASI API (Gunakan API Key kamu)
-        self.base_url = "https://moltyroyale.com"
-        self.api_key = "21ae88b7-7323-4133-8f36-6bb831aa9590"
-        self.headers = {"X-API-Key": self.api_key}
-        
+class AggressiveAgent:
+    def __init__(self, bot_instance):
         self.bot = bot_instance
-        self.game_id = None
-        self.agent_id = None
-        self.last_pos = {'regionId': None}
+        self.last_pos = {'x': 0, 'y': 0}
         self.stuck_count = 0
-        
-        # DATABASE JAWABAN GUARDIAN
-        self.riddle_db = {
-            "france": "Paris",
-            "2 + 2": "4",
-            "sky": "Blue",
-            "answer to everything": "42"
-        }
+        self.is_healing_mode = False 
 
-    def start_game(self):
-        try:
-            # 1. Cari Game
-            resp = requests.get(f"{self.base_url}/games?status=waiting", timeout=10)
-            if resp.status_code != 200: return
-            
-            games = resp.json().get("data", [])
-            if not games: return
-            
-            # Ambil ID game pertama yang tersedia
-            self.game_id = games[0]["id"] if isinstance(games, list) else games["id"]
-            
-            # 2. Registrasi
-            res = requests.post(
-                f"{self.base_url}/games/{self.game_id}/agents/register",
-                headers=self.headers,
-                json={"name": "AggressiveBot"},
-                timeout=10
-            )
-            
-            data = res.json().get("data")
-            if data:
-                self.agent_id = data["id"]
-                print(f"BERHASIL JOIN MATCH! ID: {self.agent_id}")
-        except Exception as e:
-            print(f"Error start_game: {e}")
+    def get_dist(self, p1, p2):
+        return math.sqrt((p1['x'] - p2['x'])**2 + (p1['y'] - p2['y'])**2)
 
-    def run_logic(self, game_state=None):
-        # Jika game_state tidak dikirim dari main.py, kita ambil sendiri
-        if not game_state:
-            try:
-                resp = requests.get(f"{self.base_url}/games/{self.game_id}/agents/{self.agent_id}/state", 
-                                    headers=self.headers, timeout=10)
-                game_state = resp.json().get("data")
-            except: return
+    def run_logic(self, game_state):
+        # 1. AMBIL DATA DASAR
+        player = game_state.get('player') or game_state.get('me')
+        if not player or player.get('hp', 0) <= 0: return
+            
+        enemies = game_state.get('enemies', [])
+        items = game_state.get('items', [])
+        inventory = str(game_state.get('inventory', []))
+        raw_inv = game_state.get('inventory', [])
+        current_region = game_state.get('currentRegion', {})
 
-        if not game_state or not game_state["self"]["isAlive"]:
+        # --- STRATEGI 1: ANTI-DEATH ZONE (PRIORITAS MUTLAK) ---
+        # Jika di zona merah, segera lari ke zona aman terdekat
+        if current_region.get('isDeathZone'):
+            self.bot.move_to_safe_zone() # Fungsi internal untuk lari dari zona
             return
 
-        self_data = game_state["self"]
-        curr_region = game_state["currentRegion"]
-        inv = self_data.get('inventory', [])
-        ep = self_data.get('ep', 0)
-        hp = self_data.get('hp', 100)
+        # 2. LOGIKA BUANG ITEM SAMPAH
+        if len(raw_inv) >= 9:
+            for item in raw_inv:
+                if item.get('type') not in ['Katana', 'Sniper', 'Bandage', 'Medkit', 'Vest', 'Helmet']:
+                    self.bot.drop_item(item.get('id'))
+                    break 
 
-        # --- A. FREE ACTIONS ---
-        # 1. Anti-Curse (Cek Whisper)
-        for msg in game_state.get("recentMessages", []):
-            if msg["senderId"] != self.agent_id and msg.get("type") == "whisper":
-                text = msg["message"].lower()
-                ans = next((a for q, a in self.riddle_db.items() if q in text), "Cooperating.")
-                self.send_whisper(msg["senderId"], ans)
+        current_hp = player.get('hp', 100)
 
-        # 2. Auto Pickup (Limit 8 slot)
-        if len(inv) < 8:
-            for itm in game_state.get("visibleItems", []):
-                if itm["regionId"] == self_data["regionId"]:
-                    self.post_action({"type": "pickup", "itemId": itm["item"]["id"]}, "Looting")
+        # 3. LOGIKA PENYEMBUHAN (HP < 20)
+        if current_hp <= 20: self.is_healing_mode = True
+        elif current_hp >= 90: self.is_healing_mode = False
 
-        # 3. Auto Equip Senjata Terbaik
-        weapons = [i for i in inv if i.get("category") == "weapon"]
-        if weapons:
-            best = max(weapons, key=lambda w: w.get('atkBonus', 0))
-            curr_atk = (self_data.get("equippedWeapon") or {}).get("atkBonus", 0)
-            if best['atkBonus'] > curr_atk:
-                self.post_action({"type": "equip", "itemId": best['id']}, "Equipping best weapon")
-
-        # --- B. MAIN ACTIONS ---
-        action = {"type": "explore"}
-        reason = "Patrolling area"
-
-        # 1. Prioritas: Lari dari Death Zone
-        if curr_region.get('isDeathZone'):
-            exits = curr_region.get("connections", [])
-            action = {"type": "move", "regionId": exits[0] if exits else None}
-            reason = "Escaping Death Zone!"
-        
-        # 2. Prioritas: Healing
-        elif hp < 30:
-            meds = next((i for i in inv if i.get("category") == "recovery"), None)
-            if meds: action = {"type": "use_item", "itemId": meds["id"]}
-            reason = "Critical HP: Healing"
-
-        # 3. Prioritas: Rest jika EP Low
-        elif ep < 2:
-            action = {"type": "rest"}
-            reason = "Recovering Energy"
-
-        # 4. Prioritas: Serang
-        else:
-            enemies = [a for a in game_state.get("visibleAgents", []) if a["isAlive"]]
+        if self.is_healing_mode:
             if enemies:
-                target = min(enemies, key=lambda a: a['hp'])
-                action = {"type": "attack", "targetId": target["id"], "targetType": "agent"}
-                reason = "Attacking weak player"
-            else:
-                monsters = game_state.get("visibleMonsters", [])
-                if monsters:
-                    # Cari Guardian dulu untuk sMoltz besar
-                    guard = next((m for m in monsters if "Guardian" in m.get("type", "")), monsters[0])
-                    action = {"type": "attack", "targetId": guard["id"], "targetType": "monster"}
-                    reason = "Hunting for sMoltz"
+                avg_x = sum(e['x'] for e in enemies) / len(enemies)
+                avg_y = sum(e['y'] for e in enemies) / len(enemies)
+                self.bot.move_to(player['x'] + (player['x'] - avg_x), player['y'] + (player['y'] - avg_y))
+            if 'Bandage' in inventory: self.bot.use_item('Bandage')
+            return
 
-        self.post_action(action, reason)
+        # 4. LOGIKA ANTI-GANK (2+ Musuh)
+        if len(enemies) >= 2:
+            avg_x = sum(e['x'] for e in enemies) / len(enemies)
+            avg_y = sum(e['y'] for e in enemies) / len(enemies)
+            self.bot.move_to(player['x'] + (player['x'] - avg_x), player['y'] + (player['y'] - avg_y))
+            return
 
-    def post_action(self, action, thought):
-        try:
-            requests.post(f"{self.base_url}/games/{self.game_id}/agents/{self.agent_id}/action", 
-                          headers=self.headers, json={"action": action, "thought": {"reasoning": thought}}, timeout=5)
-        except: pass
+        # 5. LOGIKA SERANGAN PEMAIN (HP > 60)
+        target = min(enemies, key=lambda e: e.get('hp', 100)) if enemies else None
+        if target and current_hp > 60:
+            dist = self.get_dist(player, target)
+            self.bot.move_to(target['x'], target['y'])
+            if dist < 1.5: self.bot.use_skill('all')
+            self.bot.attack(target['id'])
+            return
 
-    def send_whisper(self, target_id, message):
-        try:
-            requests.post(f"{self.base_url}/games/{self.game_id}/agents/{self.agent_id}/action",
-                          headers=self.headers, json={"action": {"type": "whisper", "targetId": target_id, "message": message}}, timeout=5)
-        except: pass
+        # 6. STRATEGI EKONOMI ($SMOLTZ & LOOTING)
+        elif not target:
+            # A. Cari Senjata/Armor Dulu
+            current_weapon = player.get('weapon', 'Fist')
+            priority_items = [i for i in items if i.get('type') in ['Katana', 'Sniper', 'Vest', 'Helmet']]
+            if priority_items:
+                best_item = min(priority_items, key=lambda i: self.get_dist(player, i))
+                self.bot.move_to(best_item['x'], best_item['y'])
+                self.bot.pickup(best_item['id'])
+                self.bot.equip(best_item['id'])
+                return
+
+            # B. Berburu $sMoltz (Monster/Guardian/Supply Caches)
+            # Guardian/Monster sering membawa sMoltz yang jatuh saat mati
+            objects = game_state.get('objects', []) # Caches atau Monsters
+            if objects:
+                best_obj = min(objects, key=lambda o: self.get_dist(player, o))
+                self.bot.move_to(best_obj['x'], best_obj['y'])
+                self.bot.interact(best_obj['id']) # Ambil/Interaksi untuk sMoltz
+                return
+            
+            # C. Cari Loot Umum (Explore)
+            self.bot.find_loot()
+
+        # 7. ANTI-STUCK
+        if player['x'] == self.last_pos['x'] and player['y'] == self.last_pos['y']:
+            self.stuck_count += 1
+        else: self.stuck_count = 0
+        self.last_pos = {'x': player['x'], 'y': player['y']}
+        if self.stuck_count > 2: 
+            self.bot.move_to(player['x'] + 2, player['y'] - 1)
