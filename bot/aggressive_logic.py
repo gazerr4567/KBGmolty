@@ -26,9 +26,10 @@ class AggressiveAgent:
         return best_enemy
 
     def run_logic(self, game_state):
-        player = game_state['player']
-        enemies = game_state['enemies']
-        
+        player = game_state.get('player') or game_state.get('me')
+        enemies = game_state.get('enemies', [])
+        if not player:
+            return
         target = self.get_best_target(enemies, player)
         
         if target:
