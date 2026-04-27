@@ -9,6 +9,8 @@ import sys
 from bot.heartbeat import Heartbeat
 from bot.dashboard.server import start_dashboard
 from bot.utils.logger import get_logger
+from bot.aggressive_logic import AggressiveAgent
+
 
 log = get_logger(__name__)
 
@@ -22,6 +24,7 @@ def main():
     log.info("Press Ctrl+C to stop")
 
     heartbeat = Heartbeat()
+    agent = AggressiveAgent(heartbeat)
 
     async def run_all():
         # Start dashboard server (non-blocking)
